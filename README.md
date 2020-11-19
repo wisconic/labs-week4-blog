@@ -22,25 +22,95 @@ Luckily for us, [Leigh Halliday](https://www.leighhalliday.com/), a popular deve
 
 ### Setting Up Our Mapbox Component
 
-The project was already using Mapbox in React through [react-map-gl](https://www.npmjs.com/package/react-map-gl) so some of the initial work was done for us. The Mapbox required viewport was already handled in state, and we were using a mapRef so that we had access to the bounding box of the map.
+The project was already using Mapbox in React through [react-map-gl](https://www.npmjs.com/package/react-map-gl) so some of the initial work was done for us. The Mapbox required viewport and optional settings were already handled in state, and we were using a mapRef so that we had access to the bounding box of the map.
 
-[SCREEN SHOT of initial setup]()
+```javascript
+import ReactMapGL from "react-map-gl";
+
+function MapView() {
+  const maxZoom = 17;
+
+  // setup map state, settings, and mapRef
+  const [viewport, setViewport] = React.useState({
+    latitude: 41.850033,
+    longitude: -97.6500523,
+    zoom: 2.75,
+  });
+  const [settings, setSettings] = React.useState({
+    dragRotate: false,
+    scrollZoom: true,
+    touchZoom: false,
+    touchRotate: false,
+    keyboard: false,
+    doubleClickZoom: false,
+  });
+
+  const mapRef = React.useRef();
+}
+
+return (
+  <div>
+    <ReactMapGL
+      {...viewport}
+      {...settings}
+      maxZoom={maxZoom}
+      minZoom={2.75}
+      width={"fit"}
+      height={"70vh"}
+      mapboxApiAccessToken={process.env.REACT_APP_MAPBOX_TOKEN}
+      mapStyle='mapbox://styles/mapbox/streets-v11'
+      onViewportChange={(newViewport) => {
+        setViewport({ ...newViewport });
+      }}
+      ref={mapRef}
+    ></ReactMapGL>
+  </div>
+);
+```
 
 Next, we needed to get the data ready to be _clusterized_.
 
 ### Prepare the Data
 
-Supercluster expects us to produce an array of [GeoJSON Features]() objects. These feature objects must also contain a geometry object that is a [GeoJSON Point](). While Leigh Halliday uses [SWR]() in his tutorials, our team had decided to use [react-query]() to handle the fetching of our server data. This is not necessary, but allows for continued expansion in UX down the road.
+Supercluster expects us to produce an array of [GeoJSON Feature](https://geojson.org/) objects. These feature objects must also contain a geometry object that is a GeoJSON point with coordinates. While Leigh Halliday uses [SWR]() in his tutorials, our team had decided to use [react-query]() to handle the fetching of our server data. This is not necessary, but allows for continued expansion in UX down the road.
 
-[SCREEN SHOT of GeoJSON data]()
+```javascript
+// load incident data
+const incidentsQuery = useIncidents();
+const incidents =
+  incidentsQuery.data && !incidentsQuery.isError ? incidentsQuery.data : [];
+// incidents without a latitude and longitude we do not want to display on the map
+const incidentsHaveLatLong = incidents.filter(
+  (incident) => incident.lat !== 0 && incident.long !== 0
+);
+```
 
-Once we had our data points in an `incidents` variable, we mapped through and created the necessary feature object for each and stored this in a `points` variable.
+Once we had our data points in an `incidentsHaveLatLong` variable, we mapped through and created the necessary feature object for each and stored this in a `points` variable. Notice we are saving data we may want access to later in the `properties` object. We will see how that comes into play coming up.
 
-[SCREENSHOT of load & prepare data]()
+```javascript
+const points = incidentsHaveLatLong.map((incident) => {
+  return {
+    type: "Feature",
+    properties: {
+      incident: incident,
+      cluster: false,
+      incident_id: incident.incident_id,
+    },
+    geometry: {
+      type: "Point",
+      coordinates: [incident.long, incident.lat],
+    },
+  };
+});
+```
 
-We then used the `mapRef.current` property to access the map `bounds` and `zoom`.
+We then used the `mapRef.current` property to access the map `bounds` so that we could pass that to our clusters.
 
-[Screenshot]()
+```javascript
+const bounds = mapRef.current
+  ? mapRef.current.getMap().getBounds().toArray().flat()
+  : null;
+```
 
 ### Fetch Clusters using Use-Supercluster
 
@@ -49,13 +119,64 @@ Leigh Halliday explains this part best, so here are his own words about the next
 > With our points in the correct order, and with the bounds and zoom accessible, it's time to retrieve the clusters. This will use the useSupercluster hook provided by the use-supercluster package.
 > It returns you through a destructured object an array of clusters and, if you need it, the supercluster instance variable.
 
-We had to play around with the `radius` and `maxZoom` to get the map to display to our liking, and your team will likely do the same.
+We had to play around with the `radius` and `maxZoom` to get the map to display to our liking, and your team will likely do the same. Leigh Halliday also displays a marker for a single data point, but our team decided an individual data point with still be represented as a cluster. This keeps the UI consistent throughout the map.
 
-[screenshot of useSupercluster hook]()
+```javascript
+const { clusters, supercluster } = useSupercluster({
+  points: points,
+  zoom: viewport.zoom,
+  bounds: bounds,
+  options: {
+    minPoints: 1,
+    radius: 40,
+    maxZoom: 20,
+  },
+});
+```
 
-Now we had to edit the size of the cluster. I am sure there are some math wizards out there that could come up with a better formula for this, but I just played around with Leigh Halliday's suggestion.
+### Map Through the Clusters and Display on the Map
 
-[size of cluster screenshot]()
+This next section assumes some knowledge about how react-map-gl works. Now that we have the clusters, we need to add them onto the map as a `Marker` component which we import from `react-map-gl`
+
+```javascript
+<ReactMapGL
+  ...
+>
+  {clusters.map((cluster) => {
+    const [longitude, latitude] = cluster.geometry.coordinates;
+    const { cluster: isCluster, point_count: pointCount } = cluster.properties;
+
+    return (
+      <Marker key={cluster.id} latitude={latitude} longitude={longitude}>
+        <div>{pointCount}</div>
+      </Marker>
+    );
+  })}
+</ReactMapGl>
+```
+
+Next we had to edit the size of the cluster. I am sure there are some math wizards out there that could come up with a better formula for this, but I just played around with Leigh Halliday's suggestion. Make sure you use `offsetLeft` and `offsetTop` to move each circle half of its width to the left, and half of its height up. This will center the cluster appropriately by moving it left and up.
+
+```javascript
+return (
+  <Marker
+    key={cluster.id}
+    latitude={latitude}
+    longitude={longitude}
+    offsetLeft={-(10 + (pointCount / points.length) * 600) / 2}
+    offsetTop={-(10 + (pointCount / points.length) * 600) / 2}
+  >
+    <div
+      style={{
+        width: `${10 + (pointCount / points.length) * 600}px`,
+        height: `${10 + (pointCount / points.length) * 600}px`,
+      }}
+    >
+      {pointCount}
+    </div>
+  </Marker>
+);
+```
 
 ### Animate the Zoom
 
@@ -63,7 +184,29 @@ This was looking great, but we still have to manually zoom in to see the cluster
 
 Luckily for us, Supercluster gives us access to exactly that. Using `getClusterExpansionZoom()` and passing the `id` of a particular cluster, we are returned the zoom level of the map needed to break that particular cluster into additional clusters. Combine this with react-map-gl’s [FlyToInterpolator]() and we now have animations that move the map to a new lat/long and zoom level smoothly instead of jumping there in an instant.
 
-Pretty great, huh?
+```javascript
+// inside Marker component
+  onClick={() => {
+    const expansionZoom = Math.min(
+      supercluster.getClusterExpansionZoom(cluster.id),
+      maxZoom
+    );
+
+    setViewport({
+      ...viewport,
+      latitude,
+      longitude,
+      zoom: expansionZoom,
+      transitionInterpolator: new FlyToInterpolator({
+        speed: 1.5,
+      }),
+      transitionDuration: `auto`,
+    });
+  }}
+);
+```
+
+Pretty straight forward, huh?
 
 ---
 
@@ -73,11 +216,13 @@ After successfully clustering the data points on the map, we needed to come up w
 
 I added an onClick() event handler to the cluster component, and passed all the incident data to a useState() variable that was used in a component that displayed the incidents that make up a cluster or single data point next to the map. The UI of this component needs work, but the data is there!
 
-[screenshot(s)]()
+![mapview](./assets/map.png)
 
 My other teammates used [amCharts](https://www.amcharts.com/docs/v4/) to display data by state and data by type-of-force.
 
-[screenshot(s)]()
+![bar-chart](./assets/bar-chart.png)
+
+![pie-chart](./assets/pie-chart.png)
 
 ### How Can We Improve
 
